@@ -1,279 +1,199 @@
 /*
- * ============================================================================
- * 五岔路口交通灯管理（C 语言实现）—— 只计算最少需要几种灯
- * ----------------------------------------------------------------------------
- * 问题：
- *   五岔路口，C、E 为单行道，共 13 条可通行路线。有的路线不能同时放行
- *   （如 E->B 与 A->D），有的可以同时放行（如 A->B 与 E->C）。
- *   问：最少需要设置几种交通灯（即把路线分几批放行）？每种灯放行哪些路线？
+ * 五岔路口交通灯管理 - 图着色问题
  *
- * 数学模型 = 图着色：
- *   顶点 = 一条路线；边 = 两条路线冲突（不能同时放行）；
- *   颜色 = 一种灯（一个相位），同一种灯（同色）下的路线可同时放行；
- *   最少颜色数 = 最少需要的灯种数。
+ * 问题描述：
+ *  一个五岔路口，C 和 E 为单行道，共有 13 条可通行路线。
+ *  用顶点表示一条通行路线，不能同时通行的线路顶点用边连接。
+ *  每个顶点染一种颜色，相邻顶点颜色不同，求最少颜色数（即最少灯组）。
  *
- * 冲突判定规则（依据路口几何）：
- *   a) 出口相同        -> 合流冲突（如 A->C 与 B->C）
- *   b) 对向车流        -> 中心对撞（如 A->B 与 B->A）
- *   c) 行驶弧线交叉    -> 交叉冲突（题目例子：E->B 与 A->D）
- *   d) 同入口分叉/接力 -> 不冲突（题目例子：A->B 与 E->C）
- *
- * 算法：
- *   1) 构建 13x13 冲突矩阵；
- *   2) 贪心图着色（Welsh-Powell：按冲突度降序分配最小可用颜色）求一个可行上界；
- *   3) 迭代加深回溯验证并求出"最少灯种数"，输出每种灯放行的路线。
- *
- * 编译运行：
- *   gcc -O2 -Wall traffic_light.c -o traffic_light
- *   ./traffic_light
- * ============================================================================
+ * 13 条路线：AB, AC, AD, BA, BC, BD, DA, DB, DC, EA, EB, EC, ED
+ * 其中 BA, DC, ED 为右转路线（不受灯控，孤立顶点）。
  */
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include <stdbool.h>
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
+#define N 13          /* 顶点数：13 条通行路线 */
+#define MAX_COLOR 10  /* 最大颜色数（上限） */
 
-#define N_DIR     5      /* 路口方向数 */
-#define N_ROUTE   13     /* 可通行路线数 */
-#define MAX_LIGHT 8      /* 灯种数上限 */
+/* 13 条通行路线名称（顶点） */
+char *routes[N] = {
+    "AB", "AC", "AD", "BA", "BC", "BD",
+    "DA", "DB", "DC", "EA", "EB", "EC", "ED"
+};
 
-/* ---- 方向定义：按题目示意图顺时针排列（角度取整便于计算） ---- */
-enum { C = 0, D = 1, E = 2, A = 3, B = 4 };
+/* 邻接矩阵：graph[i][j] = 1 表示路线 i 和路线 j 不能同时通行（有边） */
+int graph[N][N] = {0};
 
-static const char *DIR_NAME[N_DIR] = { "C", "D", "E", "A", "B" };
-static const int   DIR_ANG[N_DIR]  = { 0, 72, 144, 216, 288 };
+/* 每个顶点分配到的颜色编号（从 1 开始；0 表示未着色） */
+int color[N];
 
-/* ---- 路线结构 ---- */
-typedef struct {
-    int  in, out;         /* 入口方向、出口方向 */
-    char name[8];         /* 路线名，如 "A->B" */
-} Route;
-
-static Route routes[N_ROUTE];
-
-static int  color[N_ROUTE];                 /* 每条路线所属灯种(1..k) */
-static bool conflict[N_ROUTE][N_ROUTE];     /* 冲突矩阵 */
-static int  deg[N_ROUTE];                   /* 每条路线的冲突度数 */
-static int  order[N_ROUTE];                 /* 着色顺序（按度数降序） */
-
-/* --------------------------------------------------------------------------
- * 1. 路线定义
- * --------------------------------------------------------------------------
- * C 为"入口单行"（只能从 C 进入，不能从 C 离开），
- * E 为"出口单行"（只能从 E 离开，不能进入 E），
- * 故共 3+3+3+4 = 13 条可通行路线。
+/*
+ * 构建冲突图（邻接矩阵）
+ *
+ * 冲突关系推导：
+ *  - BA(B→A)、DC(D→C)、ED(E→D) 是右转路线，与其他任何路线不冲突（孤立点）
+ *  - 从 A 出发的三条路线 AB、AC、AD 互相不冲突（同入口分流）
+ *  - 从 B 出发的 BC、BD 互相不冲突
+ *  - 从 D 出发的 DA、DB 互相不冲突
+ *  - 从 E 出发的 EB、EC 互相不冲突
+ *  - EA(E→A) 与 A 方向出发的三条路线 AB、AC、AD 冲突
+ *  - A 方向出发的 AB、AC、AD 与 B、D、E 方向出发的非右转路线均冲突
+ *  - B 方向出发的 BC、BD 与 D、E 方向出发的非右转路线均冲突
+ *  - D 方向出发的 DA、DB 与 E 方向出发的 EB、EC 冲突
  */
-static void init_routes(void)
+void buildGraph(void)
 {
-    static const int in[N_ROUTE]  = { A,A,A, B,B,B, D,D,D, E,E,E,E };
-    static const int out[N_ROUTE] = { B,C,D, A,C,D, A,B,C, A,B,C,D };
+    int i, j;
+    /* 先清零 */
+    for (i = 0; i < N; i++)
+        for (j = 0; j < N; j++)
+            graph[i][j] = 0;
 
-    for (int i = 0; i < N_ROUTE; i++) {
-        routes[i].in  = in[i];
-        routes[i].out = out[i];
-        snprintf(routes[i].name, sizeof(routes[i].name), "%s->%s",
-                 DIR_NAME[in[i]], DIR_NAME[out[i]]);
-    }
+    /* 顶点索引：
+     * 0=AB  1=AC  2=AD  3=BA  4=BC  5=BD
+     * 6=DA  7=DB  8=DC  9=EA  10=EB 11=EC 12=ED
+     */
+
+    /* --- EA(9) 与 A 方向出发的 AB(0)、AC(1)、AD(2) 冲突 --- */
+    graph[9][0] = graph[0][9] = 1;
+    graph[9][1] = graph[1][9] = 1;
+    graph[9][2] = graph[2][9] = 1;
+
+    /* --- A 方向出发的 AB、AC、AD 与 B 方向出发的 BC、BD 冲突 --- */
+    graph[0][4] = graph[4][0] = 1;
+    graph[0][5] = graph[5][0] = 1;
+    graph[1][4] = graph[4][1] = 1;
+    graph[1][5] = graph[5][1] = 1;
+    graph[2][4] = graph[4][2] = 1;
+    graph[2][5] = graph[5][2] = 1;
+
+    /* --- A 方向出发的 AB、AC、AD 与 D 方向出发的 DA、DB 冲突 --- */
+    graph[0][6] = graph[6][0] = 1;
+    graph[0][7] = graph[7][0] = 1;
+    graph[1][6] = graph[6][1] = 1;
+    graph[1][7] = graph[7][1] = 1;
+    graph[2][6] = graph[6][2] = 1;
+    graph[2][7] = graph[7][2] = 1;
+
+    /* --- A 方向出发的 AB、AC、AD 与 E 方向出发的 EB、EC 冲突 --- */
+    graph[0][10] = graph[10][0] = 1;
+    graph[0][11] = graph[11][0] = 1;
+    graph[1][10] = graph[10][1] = 1;
+    graph[1][11] = graph[11][1] = 1;
+    graph[2][10] = graph[10][2] = 1;
+    graph[2][11] = graph[11][2] = 1;
+
+    /* --- B 方向出发的 BC、BD 与 D 方向出发的 DA、DB 冲突 --- */
+    graph[4][6] = graph[6][4] = 1;
+    graph[4][7] = graph[7][4] = 1;
+    graph[5][6] = graph[6][5] = 1;
+    graph[5][7] = graph[7][5] = 1;
+
+    /* --- B 方向出发的 BC、BD 与 E 方向出发的 EB、EC 冲突 --- */
+    graph[4][10] = graph[10][4] = 1;
+    graph[4][11] = graph[11][4] = 1;
+    graph[5][10] = graph[10][5] = 1;
+    graph[5][11] = graph[11][5] = 1;
+
+    /* --- D 方向出发的 DA、DB 与 E 方向出发的 EB、EC 冲突 --- */
+    graph[6][10] = graph[10][6] = 1;
+    graph[6][11] = graph[11][6] = 1;
+    graph[7][10] = graph[10][7] = 1;
+    graph[7][11] = graph[11][7] = 1;
+
+    /* 注意：BA(3)、DC(8)、ED(12) 是右转路线，
+     * 与所有其他顶点都没有边（孤立点），不受灯控。
+     */
 }
 
-/* --------------------------------------------------------------------------
- * 2. 冲突判定
- * -------------------------------------------------------------------------- */
-/* 点 p 是否位于顺时针弧 [s,e] 的严格内部（不含两端点） */
-static bool on_arc(int s, int e, int p)
+/*
+ * 贪心图着色算法
+ * 按顶点顺序依次着色：给每个顶点分配与其相邻顶点不同的最小颜色编号。
+ * 颜色从 1 开始编号。
+ */
+void greedyColoring(void)
 {
-    if (s == e) return false;
-    if (s < e)  return (p > s && p < e);   /* 不跨 0 度 */
-    return (p > s || p < e);               /* 跨 0 度，如 [288,72] */
-}
+    int i, j, cr;
+    int used[MAX_COLOR + 1];
 
-/* 两条弧是否共享端点（同入口分叉 / 接力车流） */
-static bool share_endpoint(int s1, int e1, int s2, int e2)
-{
-    return (s1 == s2 || e1 == e2 || s1 == e2 || e1 == s2);
-}
+    /* 所有顶点初始未着色（0 表示未着色） */
+    for (i = 0; i < N; i++)
+        color[i] = 0;
 
-/* 两条路线能否同时放行？返回 true 表示冲突（不能同时放行） */
-static bool is_conflict(const Route *r1, const Route *r2)
-{
-    if (r1 == r2) return false;
-
-    /* a) 出口相同：在出口处合流，冲突 */
-    if (r1->out == r2->out) return true;
-
-    /* b) 对向车流：如 A->B 与 B->A，在路口中心对撞，冲突 */
-    if (r1->in == r2->out && r1->out == r2->in) return true;
-
-    int s1 = DIR_ANG[r1->in], e1 = DIR_ANG[r1->out];
-    int s2 = DIR_ANG[r2->in], e2 = DIR_ANG[r2->out];
-
-    /* c) 共享端点（同入口分叉、接力车流）：不交叉、不冲突 */
-    if (share_endpoint(s1, e1, s2, e2)) return false;
-
-    /* d) 圆弧端点交错：两条路径在路口内部交叉，冲突
-     *    （E->B 与 A->D 冲突、A->B 与 E->C 不冲突，题目例子均由本规则得到） */
-    return (on_arc(s1, e1, s2) != on_arc(s1, e1, e2));
-}
-
-/* --------------------------------------------------------------------------
- * 3. 构建冲突矩阵，并按冲突度降序确定着色顺序（Welsh-Powell）
- * -------------------------------------------------------------------------- */
-static void build_conflict_matrix(void)
-{
-    for (int i = 0; i < N_ROUTE; i++) {
-        deg[i] = 0;
-        for (int j = 0; j < N_ROUTE; j++) {
-            conflict[i][j] = is_conflict(&routes[i], &routes[j]);
-            if (conflict[i][j]) deg[i]++;
-        }
-    }
-    for (int i = 0; i < N_ROUTE; i++) order[i] = i;
-    for (int i = 0; i < N_ROUTE; i++)
-        for (int j = i + 1; j < N_ROUTE; j++)
-            if (deg[order[j]] > deg[order[i]]) {
-                int t = order[i]; order[i] = order[j]; order[j] = t;
+    /* 按顺序处理每个顶点 */
+    for (i = 0; i < N; i++) {
+        /* 记录相邻顶点已使用的颜色 */
+        memset(used, 0, sizeof(used));
+        for (j = 0; j < N; j++) {
+            if (graph[i][j] && color[j] != 0) {
+                used[color[j]] = 1;
             }
-}
-
-/* --------------------------------------------------------------------------
- * 4. 图着色：求最少灯种数
- * -------------------------------------------------------------------------- */
-/* 贪心着色：为每个顶点分配"不与已着色且冲突顶点同色"的最小颜色，返回颜色数 */
-static int greedy_coloring(void)
-{
-    int maxc = 0;
-    memset(color, 0, sizeof(color));
-
-    for (int k = 0; k < N_ROUTE; k++) {
-        int  v = order[k];
-        bool used[MAX_LIGHT + 1] = { false };
-
-        for (int i = 0; i < k; i++) {
-            int u = order[i];
-            if (conflict[v][u] && color[u] > 0) used[color[u]] = true;
         }
-        int c = 1;
-        while (c <= MAX_LIGHT && used[c]) c++;
-        color[v] = c;
-        if (c > maxc) maxc = c;
-    }
-    return maxc;
-}
-
-/* 回溯（DFS）：能否用 maxc 种颜色给 order[idx..] 全部着色（迭代加深用） */
-static bool try_color(int idx, int maxc)
-{
-    if (idx == N_ROUTE) return true;
-
-    int v = order[idx];
-    for (int c = 1; c <= maxc; c++) {
-        bool ok = true;
-        for (int i = 0; i < idx; i++) {
-            int u = order[i];
-            if (conflict[v][u] && color[u] == c) { ok = false; break; }
-        }
-        if (ok) {
-            color[v] = c;
-            if (try_color(idx + 1, maxc)) return true;
+        /* 找到第一个未被相邻顶点使用的颜色 */
+        for (cr = 1; cr <= MAX_COLOR; cr++) {
+            if (!used[cr]) {
+                color[i] = cr;
+                break;
+            }
         }
     }
-    return false;
 }
 
-/* 迭代加深：从 1 开始逐级尝试，求"最少灯种数"并生成一组最优划分 */
-static int minimal_lights(int upper)
+/* 判断顶点是否为右转路线（孤立点，不受灯控） */
+int isRightTurn(int v)
 {
-    for (int k = 1; k < upper; k++) {
-        memset(color, 0, sizeof(color));
-        if (try_color(0, k)) return k;
+    /* BA=3, DC=8, ED=12 */
+    return (v == 3 || v == 8 || v == 12);
+}
+
+int main(void)
+{
+    int i, c, maxColor = 0;
+
+    buildGraph();
+    greedyColoring();
+
+    /* 统计最大颜色编号 */
+    for (i = 0; i < N; i++) {
+        if (color[i] > maxColor)
+            maxColor = color[i];
     }
-    greedy_coloring();   /* 兜底：贪心方案本身就是可行解 */
-    return upper;
-}
 
-/* --------------------------------------------------------------------------
- * 5. 输出
- * -------------------------------------------------------------------------- */
-static void print_header(void)
-{
-    printf("====================================================================\n");
-    printf(" 五岔路口交通灯管理 —— 最少灯种计算\n");
-    printf(" 方向布置(顺时针): C(0°) D(72°) E(144°) A(216°) B(288°)\n");
-    printf(" 数学模型: 图着色（顶点=路线，边=冲突，颜色=灯种）\n");
-    printf("====================================================================\n");
+    printf("=============================================\n");
+    printf("  五岔路口交通灯管理 — 图着色求解结果\n");
+    printf("=============================================\n\n");
 
-    printf("\n----- 可通行路线（13 条） -----\n");
-    for (int i = 0; i < N_ROUTE; i++)
-        printf("  %2d. %s  (入口 %s 出口 %s)\n", i, routes[i].name,
-               DIR_NAME[routes[i].in], DIR_NAME[routes[i].out]);
-}
-
-static void print_conflict_matrix(void)
-{
-    printf("\n----- 冲突矩阵（1=冲突, . =可同时放行） -----\n");
-    printf("      ");
-    for (int j = 0; j < N_ROUTE; j++)
-        printf("%-5s", routes[j].name);
-    printf("\n");
-    for (int i = 0; i < N_ROUTE; i++) {
-        printf("%-5s ", routes[i].name);
-        for (int j = 0; j < N_ROUTE; j++)
-            printf("%-5s", conflict[i][j] ? "1" : ".");
-        printf("  deg=%d\n", deg[i]);
+    /* 输出右转路线（不受灯控） */
+    printf("【右转路线（不受灯控限制，可随时通行）】\n  ");
+    for (i = 0; i < N; i++) {
+        if (isRightTurn(i)) {
+            printf("%s  ", routes[i]);
+        }
     }
-}
+    printf("\n\n");
 
-/* 输出每种灯放行的路线，并自检灯内两两无冲突 */
-static void print_lights(int light_count)
-{
-    printf("\n----- 最少需要 %d 种灯，每种灯放行的路线 -----\n", light_count);
-    for (int k = 1; k <= light_count; k++) {
-        printf("第 %d 种灯: ", k);
-        bool first = true;
-        for (int i = 0; i < N_ROUTE; i++) {
-            if (color[i] == k) {
-                printf("%s%s", first ? "" : ", ", routes[i].name);
-                first = false;
+    /* 按颜色分组输出 */
+    printf("【按灯组（颜色）分组结果】\n");
+    for (c = 1; c <= maxColor; c++) {
+        int first = 1;
+        printf("  颜色 %d（灯组 %d）：", c, c);
+        for (i = 0; i < N; i++) {
+            if (color[i] == c && !isRightTurn(i)) {
+                if (!first) printf("、");
+                printf("%s", routes[i]);
+                first = 0;
             }
         }
         printf("\n");
     }
 
-    bool ok = true;
-    for (int i = 0; i < N_ROUTE && ok; i++)
-        for (int j = i + 1; j < N_ROUTE; j++)
-            if (color[i] == color[j] && conflict[i][j]) {
-                printf("[自检] 第 %d 种灯内 %s 与 %s 冲突！\n",
-                       color[i], routes[i].name, routes[j].name);
-                ok = false;
-            }
-    printf("[自检] 每种灯内路线两两可同时放行：%s\n", ok ? "通过" : "失败");
-}
-
-/* -------------------------------------------------------------------------- */
-int main(void)
-{
-#ifdef _WIN32
-    SetConsoleOutputCP(CP_UTF8);   /* Windows 控制台使用 UTF-8 输出 */
-#endif
-
-    init_routes();
-    build_conflict_matrix();
-
-    print_header();
-    print_conflict_matrix();
-
-    int greedy = greedy_coloring();   /* 贪心上界 */
-    int best   = minimal_lights(greedy);   /* 迭代加深求最少灯种数 */
-
-    printf("\n[结论] 贪心方案需要 %d 种灯；经迭代加深回溯验证，"
-           "最少需要 %d 种灯。\n", greedy, best);
-
-    print_lights(best);
+    printf("\n---------------------------------------------\n");
+    printf("结论：最少需要 %d 种颜色（即 %d 个灯组）即可控制该路口。\n",
+           maxColor, maxColor);
+    printf("（另有 3 条右转路线不受灯控限制。）\n");
+    printf("=============================================\n");
 
     return 0;
 }
