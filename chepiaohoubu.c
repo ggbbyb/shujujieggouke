@@ -10,10 +10,11 @@ typedef struct Order {
     struct Order *next;
 } OrderNode;
 
-// 候补队列：链式队列结构
+// 候补队列：链式队列结构 + 全局余票池
 typedef struct {
-    OrderNode *front;   // 队头指针
-    OrderNode *rear;    // 队尾指针
+    OrderNode *front;         // 队头指针
+    OrderNode *rear;          // 队尾指针
+    int remainingTickets;     // 全局余票池：累计留存未使用的余票
 } WaitQueue;
 
 /**
@@ -26,12 +27,27 @@ void initQueue(WaitQueue *q) {
         exit(1);
     }
     q->front->next = NULL;
+    q->remainingTickets = 0; // 初始状态无余票
 }
 
 /**
- * 1. 新增候补订单：订单加入队列尾部（入队）
+ * 1. 新增候补订单
+ * 优先检查余票池：有票直接出票，无票才加入队尾排队
  */
 void enQueue(WaitQueue *q, char *orderId, char *name, char *idCard) {
+    // 余票池有剩余：直接候补成功，无需排队
+    if (q->remainingTickets > 0) {
+        q->remainingTickets--;
+        printf("\n===== 候补成功（余票充足，直接出票）=====\n");
+        printf("订单号：%s\n", orderId);
+        printf("旅客姓名：%s\n", name);
+        printf("身份证号：%s\n", idCard);
+        printf("余票池剩余：%d张\n", q->remainingTickets);
+        printf("========================================\n");
+        return;
+    }
+
+    // 无可用余票：创建节点，加入队列尾部排队
     OrderNode *newNode = (OrderNode*)malloc(sizeof(OrderNode));
     if (!newNode) {
         printf("内存不足，添加订单失败！\n");
@@ -44,22 +60,27 @@ void enQueue(WaitQueue *q, char *orderId, char *name, char *idCard) {
 
     q->rear->next = newNode;
     q->rear = newNode;
-    printf(">> 候补订单提交成功，已进入排队序列\n");
+    printf(">> 当前无可用余票，候补订单已进入排队序列\n");
 }
 
 /**
- * 2. 余票发放：输入余票数量k，从队头依次处理候补订单
- * 基础版默认每个订单对应1张车票
+ * 2. 余票发放
+ * 本次释放的票先加入全局余票池，再从队头依次按顺序出票
+ * 没用完的余票继续留在池中，供后续新增订单使用
  */
 void distributeTickets(WaitQueue *q, int k) {
+    // 本次释放的余票累加入全局余票池
+    q->remainingTickets += k;
+    printf("\n>> 本次新增余票%d张，当前余票池总计：%d张\n", k, q->remainingTickets);
+
     if (q->front == q->rear) {
-        printf(">> 当前候补队列为空，无订单可处理\n");
+        printf(">> 当前候补队列为空，余票已留存，等待新候补订单\n");
         return;
     }
 
     int successCount = 0;
-    // 余票充足且队列非空时，依次出票
-    while (k > 0 && q->front != q->rear) {
+    // 余票充足且队列非空时，从队头依次出票
+    while (q->remainingTickets > 0 && q->front != q->rear) {
         OrderNode *temp = q->front->next;
 
         // 输出候补成功的订单信息
@@ -71,19 +92,17 @@ void distributeTickets(WaitQueue *q, int k) {
 
         // 队头订单出队
         q->front->next = temp->next;
-        // 特殊处理：删除最后一个节点时，队尾指针回退到头节点
+        // 边界处理：删除最后一个节点时，队尾指针回退到头节点
         if (temp == q->rear) {
             q->rear = q->front;
         }
         free(temp);
-        k--;
+
+        q->remainingTickets--; // 余票池扣减1张
         successCount++;
     }
 
-    printf("\n>> 本次释放余票%d张，完成%d个候补订单\n", successCount, successCount);
-    if (k > 0) {
-        printf(">> 剩余%d张余票，但候补队列已全部处理完毕\n", k);
-    }
+    printf("\n>> 本次完成%d个候补订单，余票池剩余：%d张\n", successCount, q->remainingTickets);
     if (q->front != q->rear) {
         printf(">> 候补队列仍有订单，继续等待下一批余票\n");
     }
@@ -114,13 +133,13 @@ int main() {
     char orderId[32], name[20], idCard[20];
     int ticketCount;
 
-    printf("====== 12306车票候补模拟系统（基础版）======\n");
+    printf("====== 12306车票候补模拟系统======\n");
 
     while (1) {
         printf("\n---------- 操作菜单 ----------\n");
         printf("1. 提交候补订单\n");
         printf("2. 释放余票并出票\n");
-        printf("3. 查看候补队列状态\n");
+        printf("3. 查看系统状态\n");
         printf("4. 退出系统\n");
         printf("请输入选项编号：");
         scanf("%d", &option);
@@ -147,6 +166,7 @@ int main() {
                 break;
 
             case 3:
+                printf("\n>> 余票池剩余票数：%d张\n", queue.remainingTickets);
                 if (isQueueEmpty(&queue)) {
                     printf(">> 当前候补队列为空\n");
                 } else {
